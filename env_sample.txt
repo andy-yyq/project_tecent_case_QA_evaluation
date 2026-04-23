@@ -1,0 +1,44 @@
+# OpenRouter LLM
+# Chat：google/gemini-2.5-flash
+# Embed：
+LLM_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+LLM_OPENROUTER_API_KEY=sk-...
+
+# 腾讯 LLM
+# Chat：deepseek-v3.2
+# Embed：
+LLM_TECENT_BASE_URL=https://api.lkeap.cloud.tencent.com/v1
+LLM_TECENT_API_KEY=sk-...
+
+# 百炼 LLM
+# Chat：qwen3-max
+# Embed：
+LLM_ALI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_ALI_API_KEY=sk-...
+
+# 智普 LLM
+# Chat：
+# Embed：embedding-3
+LLM_ZHIPU_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
+LLM_ZHIPU_API_KEY=sk-...
+
+# MySQL（生产）示例：按需填写
+MYSQL_PROD_HOST=199.229.94.205
+MYSQL_PROD_PORT=3306
+MYSQL_PROD_USER=root
+MYSQL_PROD_PASSWORD=1234567
+MYSQL_PROD_DATABASE=prod_dev
+MYSQL_PROD_CHARSET=utf8mb4
+
+# MySQL（开发）示例：按需填写
+MYSQL_DEV_HOST=199.116.178.225
+MYSQL_DEV_PORT=3306
+MYSQL_DEV_USER=root
+MYSQL_DEV_PASSWORD=1234567
+MYSQL_DEV_DATABASE=prod_dev
+MYSQL_DEV_CHARSET=utf8mb4
+
+# Qdrant 示例：按需填写
+QDRANT_URL=http://199.116.178.225:12345
+QDRANT_GRPC_PORT=16334
+QDRANT_API_KEY=123456

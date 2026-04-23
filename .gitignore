@@ -1,0 +1,6 @@
+logs/*
+evaluate_ev/*
+__pycache__/*
+.idea/*
+.env
+auth_users.json

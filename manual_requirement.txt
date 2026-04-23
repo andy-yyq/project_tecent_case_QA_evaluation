@@ -1,0 +1,462 @@
+用python编写一套异步请求大模型的代码结构，要求如下：
+1.先假设预先存在一个list结构数据，其中每个list元素是一个dict结构的数据，dict具体字段不用太在意，只是为了作为整套程序的数据输入；
+2.按照配置文件（setting.py）中设置的批次数量，遍历list并组装任务批次组，任务批次组中的每项任务包含各自独立的：任务ID、system_prompt、query_prompt；
+3.system_prompt和query_prompt是读取prompts文件夹中预先设定的.txt母版，其中每种prompt中可能包含需要替换的标记位；
+4.预留一个机制，可以从list的每个元素中（每个元素是dict数据结构）提取出指定字段后，替换掉system_prompt或者query_prompt中预留的标记位；
+5.提前对任务设置返回结果验证，所有任务的返回类型和结构需一致，返回可以预设为字符串或指定的dataclass结构；
+6.使用openai模块（账号api_key信息从.env文件获取），按批次将任务传递给异步大模型进行处理；
+7.每批次每个任务在结束后，需结合之前设定返回类型和结构，对结果进行验证，如果需返回dataclass结构，需将返回结果json化之后进行字段验证；
+8.当前批次中若有任务失败（包括：大模型调用失败，返回内容验证失败等），直接进行重试，可以在setting.py中设置最大重试次数，超过最大重试次数，整个程序退出。每个批次全部完成再进行下一批次处理；
+9.每次执行代码需要创建一个命名结构为log_yyyy-mm-dd_hh-mm-ss.log的日志，记录log使用loguru模块；
+10.log中体现任务开始时间，所有任务数量，在批次处理过程中阶段性log记录批次的处理进度，包括：已完成数量、大模型调用失败记录，返回内容验证失败数量、token消耗数量、批次处理耗时；
+11.将所有批次任务的结果统一存放在变量Tasks_Results变量中，每个元素是dict结构，key为任务ID，value为模型输出。如果要求输出指定的数据结构，则value是通过json转化后的结果。
+
+=========================
+继续优化代码：
+我创建了一个pre_handle.py，主要用来前置生成批任务需要的数据，接下来优化pre_handle.py，需要实现如下功能：
+1.通过setting.py中的MYSQL_PROD_CONFIG配置信息，及utilities.py中的mysql_query方法，访问表case_pass_step，该表结构如下：
+CREATE TABLE `case_pass_step` (
+  `id` int(11) NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `case_number` varchar(255) DEFAULT NULL COMMENT '案例编号',
+  `step_data` longtext COMMENT '步骤数据',
+  `create_time` varchar(255) DEFAULT NULL COMMENT '创建时间',
+  PRIMARY KEY (`id`) USING BTREE
+) ENGINE=InnoDB AUTO_INCREMENT=679 DEFAULT CHARSET=utf8mb4
+
+获取表中的所有数据，每条数据包含字段：case_number，step_data
+
+2.对获取到的所有数据，进行随机抽样，抽样数量可进行设置，返回新的数据列表
+
+3.新的数据列表将作为批任务输入数据:task_list，给到main.py中的main方法
+
+4.需要在pre_handle.py中对task_list列表进行验证，确保每一个任务元素必须有task_id字段，当前task_id字段为case_number
+
+5.task_id会贯穿整个任务处理始终，最后任务全部完成后，Tasks_Results中每条数据将包含最初task_list中每条数据的所有字段，并附带上相应任务的大模型的处理结果
+
+=========================
+我们继续，接下来需要完成post_handle.py中功能，对Tasks_Results结果进行后置数据处理：
+1. 以下是main.py运行最后获得的最终结果列表Tasks_Results中的每个元素结构
+{
+  'task_id': 'C00000553', 
+  'case_number': 'C00000553', 
+  'step_data': '基本信息\n问题现象：集群状态黄色...', 
+  'llm_result': {
+    'L1_question': '客户应执行什么操作...？', 
+    'L1_answer': '客户应执行...', 
+    'L2_question': '为什么在索引创建....分配？', 
+    'L2_answer': '因为主分片所在....'
+    }
+}
+创建database_record变量，将Tasks_Results中每个元素根据L1和L2的query和answer拆分为2条数据，存放在database_record中。拆分后的数据和结构如下：
+{
+  "case_source":"C00000553",  # 对应case_number
+  "level":1,  # L1对应数字：1
+  "question":"客户应执行什么操作...？",  # 对应L1_query
+  "ground_truth":"客户应执行..."  # 对应L1_answer
+} 
+与
+{
+  "case_source":"C00000553",  # 对应case_number
+  "level":2,  # L2对应数字：2
+  "question":"为什么在索引创建....分配？",  # 对应L2_query
+  "ground_truth":"因为主分片所在...."  # 对应L2_answer
+}
+注意：L1与L2的问题和答案不要张冠李戴
+
+2. 使用setting.py中的MYSQL_DEV_CONFIG 通过 utilities.py中mysql_insert方法，将database_record中所有数据写入表：casebase_qa_evaluation，表结构如下：
+CREATE TABLE `casebase_qa_evaluation` (
+  `id` int NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `question` text COMMENT '测试问题',
+  `ground_truth` text COMMENT '参考答案',
+  `case_source` varchar(255) DEFAULT NULL COMMENT '数据来源',
+  `level` tinyint DEFAULT NULL COMMENT '1：相对简单问题，2：相对复杂问题',
+  `question_grade` tinyint DEFAULT NULL COMMENT '问题及参考答案评分',
+  `test_ref` text COMMENT '测试结果的参考资料',
+  `test_answer` longtext COMMENT '测试结果',
+  `test_score` float DEFAULT NULL COMMENT '测试结果最终成绩',
+  `test_mark` varchar(255) DEFAULT NULL COMMENT '测试场次标记',
+  `update_datetime` varchar(255) DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+
+表中只记录4个字段：question、ground_truth、case_source、level
+
+3. 在main.py最后调用post_handle.py中的后置数据处理方法，完成整个流程。log记录最后完成状态。
+
+=========================
+帮我写一段python代码
+
+使用setting.py中的MYSQL_DEV_CONFIG，如下：
+MYSQL_DEV_CONFIG = {
+    "host": os.getenv("MYSQL_DEV_HOST", ""),
+    "port": int(os.getenv("MYSQL_DEV_PORT", "3306")),
+    "user": os.getenv("MYSQL_DEV_USER", ""),
+    "password": os.getenv("MYSQL_DEV_PASSWORD", ""),
+    "database": os.getenv("MYSQL_DEV_DATABASE", ""),
+    "charset": os.getenv("MYSQL_DEV_CHARSET", "utf8mb4"),
+}
+
+以及utilities.py中mysql_query方法，如下：
+def mysql_query(**kwargs):
+    '''
+    通过指定sql查询语句（及动态参数，可以没有）查询结果
+    :param sql_query: 查询语句
+    :param kwarg: 动态参数
+    :return:
+    '''
+    assert kwargs.get("sql_query"), f"入参缺失：sql_query "
+    assert kwargs.get("mysql_config"), f"入参缺失：mysql_config "
+    sql_query = kwargs["sql_query"]
+    mysql_config = kwargs["mysql_config"]
+
+    result = list()
+    pattern = re.compile(r"\{.*?\}")
+    while True:
+        if pattern.search(sql_query):
+            sign = pattern.search(sql_query).group()
+            param = sign[1:-1]
+            if kwargs.get(param):
+                sql_query = re.sub(sign, kwargs[param], sql_query)
+            else:
+                raise CustomError(f"Mysql查询参数缺失或错误:{param}")
+        else:
+            break
+
+    try:
+        conn = pymysql.connect(**mysql_config)
+        cursor = conn.cursor()
+        cursor.execute(sql_query)
+
+        size = 500
+        while True:
+            rows = cursor.fetchmany(size)
+            if not rows:
+                break
+            result.extend(rows)
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        msg = f"Error, mysql数据库查询失败a, {e}"
+        return False, None, msg
+    else:
+        return True, result, ""
+
+
+获取表：casebase_qa_evaluation的数据，表结构如下：
+CREATE TABLE `casebase_qa_evaluation` (
+  `id` int NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `question_key` varchar(20) DEFAULT NULL COMMENT '唯一ID',
+  `question` text COMMENT '测试问题',
+  `ground_truth` text COMMENT '参考答案',
+  `case_source` varchar(255) DEFAULT NULL COMMENT '数据来源',
+  `level` tinyint DEFAULT NULL COMMENT '1：相对简单问题，2：相对复杂问题',
+  `question_grade` tinyint DEFAULT NULL COMMENT '问题及参考答案评分',
+  `test_ref` text COMMENT '测试结果的参考资料',
+  `test_answer` longtext COMMENT '测试结果',
+  `test_score` float DEFAULT NULL COMMENT '测试结果最终成绩',
+  `test_mark` varchar(255) DEFAULT NULL COMMENT '测试场次标记',
+  `update_datetime` varchar(255) DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+
+每条数据只需要获取3个字段："question_key"、"question"、"level", 其中level记录的是数字：1 或 2
+
+接下来，可以通过设置抽样数量(如：sample_sum=100),level_1占比（如：level_1=0.7, 意味着level_2=0.3）,将数据重新组织后存在evaluate_items变量中，供后续程序调用
+
+====================================================
+
+继续，写一个异步请求方法，要求：
+遍历evaluate_items，模仿以下请求方式，，可以设置同一批（batch）请求数量，每批次完成后，再继续下一批请求
+url = "http://47.116.178.225:8507/search"
+data = {
+    "user_id":"yyq",
+    "session_id":"LHL_001",
+    "history_dialogs":[],
+    "msg_followUp": question,
+    "search_method":"localsearch",
+    "websearch_mode":0,
+    "stream_mode": 0,
+    "scenario_mode": 1
+}
+result = requests.post(url, json=data)
+
+其中question就取evaluate_items中元素的question内容
+
+这个请求的输出结构如下：
+{
+  "code": 200,
+  "message": "请求正常",
+  "data": {
+    "response": "根据您的问题....",
+    "data_retrieved": "内部参考...."
+  }
+}
+
+复制evaluate_items列表至新的变量：evaluate_items_result, 用以question_key作为唯一ID，实现：
+将请求结果中的 "response"内容，以字段test_answer存入evaluate_items_result相应条目
+将请求结果中的 "data_retrieved"内容，以字段test_ref存入evaluate_items_result相应条目
+最后返回evaluate_items_result
+
+============================
+非常好，最后写一个mysql数据插入程序，使用setting.py中的MYSQL_DEV_CONFIG，如下：
+MYSQL_DEV_CONFIG = {
+    "host": os.getenv("MYSQL_DEV_HOST", ""),
+    "port": int(os.getenv("MYSQL_DEV_PORT", "3306")),
+    "user": os.getenv("MYSQL_DEV_USER", ""),
+    "password": os.getenv("MYSQL_DEV_PASSWORD", ""),
+    "database": os.getenv("MYSQL_DEV_DATABASE", ""),
+    "charset": os.getenv("MYSQL_DEV_CHARSET", "utf8mb4"),
+}
+
+以及utilities.py中mysql_update方法，如下：
+def mysql_update(**kwargs):
+    assert kwargs.get("update_sql"), "入参缺失：update_sql"
+    assert kwargs.get("update_data"), "入参缺失：update_data"
+    assert kwargs.get("mysql_config"), f"入参缺失：mysql_config "
+    update_sql = kwargs["update_sql"]
+    update_data = kwargs["update_data"]
+    mysql_config = kwargs["mysql_config"]
+
+    try:
+        conn = pymysql.connect(**mysql_config)
+        with conn.cursor() as cursor:
+            cursor.executemany(update_sql, update_data)
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        msg = f"Error, mysql数据库更新失败 {e}"
+        return False, msg
+
+    return True, None
+
+将evaluate_items_result中每一条数据内的"test_answer"与"test_ref"，以"question_key"这唯一ID为对应，插入到mysql表casebase_qa_evaluation中，表结构如下：
+CREATE TABLE `casebase_qa_evaluation` (
+  `id` int NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `question_key` varchar(20) DEFAULT NULL COMMENT '唯一ID',
+  `question` text COMMENT '测试问题',
+  `ground_truth` text COMMENT '参考答案',
+  `case_source` varchar(255) DEFAULT NULL COMMENT '数据来源',
+  `level` tinyint DEFAULT NULL COMMENT '1：相对简单问题，2：相对复杂问题',
+  `question_grade` tinyint DEFAULT NULL COMMENT '问题及参考答案评分',
+  `test_ref` text COMMENT '测试结果的参考资料',
+  `test_answer` longtext COMMENT '测试结果',
+  `test_score` float DEFAULT NULL COMMENT '测试结果最终成绩',
+  `test_mark` varchar(255) DEFAULT NULL COMMENT '测试场次标记',
+  `update_datetime` varchar(255) DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+
+最后打印插入结果
+
+================================================================
+2026-04-01
+仅针对数据前置处理文件：pre_handle.py 中方法：fetch_case_pass_step_all 做修改：
+该方法修改后实现：
+1.从原来单一mysql数据表：case_pass_step 获取数据（mysql的配置信息依旧使用：settings.MYSQL_PROD_CONFIG），改为分别从2张表获取数据：
+表1：case_pass_step，获取字段：case_number, step_data
+表2：case_aiauto_pass_step，获取字段：ticket_number, case_summary
+注意：所有mysql的增删改查方法，直接使用utilities.py中已有的方法
+
+2.这2张表中获取到的每一条数据的2个字段，分别映射到新的数据结构：{"case_id":"xxxxx","case_content":"xxxxxx...."},并存在一个新列表中。
+
+3.通过case_id字段，在新列表中过滤掉已经在mysql数据表：casebase_qa_evaluation（mysql的配置信息使用：settings.MYSQL_DEV_CONFIG）中case_source字段已经存在的条目，剩余条目打乱顺序，然后作为fetch_case_pass_step_all的结果return
+
+================================================================
+
+仅针对数据后置处理文件：post_handle.py 中方法：r1_task_result_handle 做完善，该方法接受参数Tasks_Results，该参数结构为dict，key为task_id, value结构如下：
+{
+    "case_id":"xxxxx"
+    "case_content":"xxxxx..."
+    "llm_result"：{
+        "case_opinion":"xx",
+        "filter_reason":"xxxxx...",
+        "question_design":"xxxx...",
+    }
+}
+
+实现：
+将其中每一条数据写入mysql表：casebase_qa_evaluation（mysql的配置信息使用：settings.MYSQL_DEV_CONFIG），所有mysql的增删改查方法，直接使用utilities.py中已有的方法。
+
+casebase_qa_evaluation的结构如下：
+CREATE TABLE `casebase_qa_evaluation` (
+  `id` int NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `question_id` varchar(20) DEFAULT NULL COMMENT '问题ID',
+  `question` text COMMENT '问题描述',
+  `question_case_id` varchar(255) DEFAULT NULL COMMENT '问题最初来源案例id',
+  `ground_truth` text COMMENT '问题参考答案',
+  `quote_info` text COMMENT 'ground_truth参考素材汇总',
+  `quote_num` tinyint DEFAULT NULL COMMENT 'ground_truth参考的案例数量',
+  `case_opinion` varchar(0) DEFAULT NULL COMMENT '案例是否保留用于问题设计',
+  `filter_reason` varchar(255) DEFAULT NULL COMMENT '案例被过滤理由',
+  `test_ref` longtext COMMENT '测试结果的参考资料',
+  `test_answer` longtext COMMENT '测试结果',
+  `test_score` float DEFAULT NULL COMMENT '测试结果最终成绩',
+  `test_mark` varchar(255) DEFAULT NULL COMMENT '测试场次标记',
+  `update_datetime` varchar(255) DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=185 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+
+Tasks_Results写入casebase_qa_evaluation的字段对应逻辑：
+1）llm_result中question_design 对应表中question；
+2）Tasks_Results中case_id 对应表中question_case_id；
+3）llm_result中case_opinion 对应表中case_opinion；
+4）llm_result中filter_reason 对应表中filter_reason；
+
+================================================================
+
+之前我们已经完成的第一个步骤的整体过程，现在进入第二个步骤，先进行数据预处理。
+提前说明：以下涉及到mysql、Qdrant增删改查方法，直接使用utilities.py中已有的方法。
+请在pre_handle.py中创建新的方法：r2_task_prepare_handle，该方法实现如下内容：
+1）通过配置信息：settings.MYSQL_DEV_CONFIG 连接mysql，从表：casebase_qa_evaluation 中获取字段case_opinion="保留" 的所有数据，然后获取字段：question_id 、question、question_case_id；
+2) 针对每一条取出的mysql数据，先通过配置信息：settings.MYSQL_PROD_CONFIG 连接mysql，查找数据表v_all_ai_manual_case_info，根据case_id字段，获取case_id=question_case_id的数据（有且仅有1条），获得case_content内容，存放在case_ori_content变量中，再将question字段内容向量化（通过utilities.py中方法embedding_zhipu_api实现）后，使用settings.QDRANT_CONFIG 连接Qdrant数据库，通过question向量化信息，搜索并返回collection：tecent_tickets_case_study中出自己在内的最相近的top7结果，从Qdrant返回的每一个top7内容，获取 payload中的case_id,查找数据表v_all_ai_manual_case_info，根据case_id获取case_content内容，case_content存的是案例内容。将所有top7的case_content（也就是案例内容）拼接起来，之间用特殊符号间隔，存放在case_refs_content变量中。
+5）最后r2_task_prepare_handle 方法return的是一个task_list,结构如下：
+task_list=
+[
+    {
+        "question_id":"xxxx...",
+        "question":"xxxxx...",
+        "case_ori_content":"xxxxx...",
+        "case_refs_content":"xxxxx...",
+    },
+    {...}
+]
+
+================================================================
+现在需要在post_handle.py中创建 r2_task_result_handle 方法，完成对于步骤2的数据后置处理，该方法会接收Tasks_Results: Dict[str, Dict[str, Any]]作为输出参数，数据结构实例如下：
+{
+    "taskID_94240OiUCw":{
+        "question_id":"23243H2BAU",
+        "question":"在使用腾讯云 Elasticsearch....",
+        "case_ori_content":"基本信息...",
+        "case_refs_content":"基本信息...",
+        "llm_result":{
+            "final_answer":"在跨大版本（如7.14.2到9.1.3）迁移时...",
+            "quote_source":{
+                "16135996":"案例指出...",
+                "34798966":"案例指出...",
+                ...
+            }
+        }
+    },
+    "taskID_12546pghLk":{...},
+    ...
+}
+里面是汇总了所有任务ID以及对应的任务信息，任务信息中包括给到大模型的原始素材以及大模型输出后的结果"llm_result"部分。
+
+现在需要解析这些内容，并对号入坐到mysql表：casebase_qa_evaluation 中（mysql的配置信息使用：settings.MYSQL_DEV_CONFIG），所有mysql的增删改查方法，直接使用utilities.py中已有的方法。
+该表的结构如下：
+CREATE TABLE `casebase_qa_evaluation` (
+  `id` int NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `question_id` varchar(20) DEFAULT NULL COMMENT '问题ID',
+  `question` text COMMENT '问题描述',
+  `question_case_id` varchar(255) DEFAULT NULL COMMENT '问题最初来源案例id',
+  `ground_truth` text COMMENT '问题参考答案',
+  `quote_info` text COMMENT 'ground_truth参考素材汇总',
+  `quote_num` tinyint DEFAULT NULL COMMENT 'ground_truth参考的案例数量',
+  `case_opinion` varchar(255) DEFAULT NULL COMMENT '案例是否保留用于问题设计',
+  `filter_reason` varchar(255) DEFAULT NULL COMMENT '案例被过滤理由',
+  `ori_answer` text COMMENT '模型输出原始答案',
+  `final_check` varchar(255) DEFAULT NULL COMMENT '人工审核标记',
+  `test_ref` longtext COMMENT '测试结果的参考资料',
+  `test_answer` longtext COMMENT '测试结果',
+  `test_score` float DEFAULT NULL COMMENT '测试结果最终成绩',
+  `test_mark` varchar(255) DEFAULT NULL COMMENT '测试场次标记',
+  `update_datetime` varchar(255) DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=257 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+
+对号入座方式：
+1. 根据表字段question_id等于Tasks_Results每条数据中的question_id作为唯一对应信息进行对号入座（找不到的话，报错并终止程序）；
+2. 拆解llm_result中内容：
+1）将整个llm_result的json内容变成字符串，记录到表字段ori_answer中；
+2）将llm_result的final_answer记录到表字段ground_truth中；
+3）将llm_result的quote_source内的所有dict元素数量进行计数，并对所有元素key和value进行拼接，该元素key为：参考的案例id，value为：参考该案例的依据概述，拼接后的字符串存入表字段quote_info中。拼接后形式如下：
+'''
+参考案例：16135996
+参考依据：案例指出...
+
+参考案例：34798966
+参考依据：案例指出...
+
+...
+'''
+4）quote_source中dict元素计数数量，存入表字段quote_num中。
+
+================================================================
+使用streamlit写一个页面test_paper_verification.py：该页面的作用是从mysql表：casebase_qa_evaluation中获取数据（该表的访问配置信息使用：settings.MYSQL_DEV_CONFIG），并展示出来，审核后将结果写回表内。
+casebase_qa_evaluation表的结构如下：
+CREATE TABLE `casebase_qa_evaluation` (
+  `id` int NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `question_id` varchar(20) DEFAULT NULL COMMENT '问题ID',
+  `question` text COMMENT '问题描述',
+  `question_case_id` varchar(255) DEFAULT NULL COMMENT '问题最初来源案例id',
+  `ground_truth` text COMMENT '问题参考答案',
+  `quote_info` text COMMENT 'ground_truth参考素材汇总',
+  `quote_num` tinyint DEFAULT NULL COMMENT 'ground_truth参考的案例数量',
+  `case_opinion` varchar(255) DEFAULT NULL COMMENT '案例是否保留用于问题设计',
+  `filter_reason` varchar(255) DEFAULT NULL COMMENT '案例被过滤理由',
+  `ori_answer` text COMMENT '模型输出原始答案',
+  `final_check` varchar(255) DEFAULT NULL COMMENT '人工审核标记',
+  `test_ref` longtext COMMENT '测试结果的参考资料',
+  `test_answer` longtext COMMENT '测试结果',
+  `test_score` float DEFAULT NULL COMMENT '测试结果最终成绩',
+  `test_mark` varchar(255) DEFAULT NULL COMMENT '测试场次标记',
+  `update_datetime` varchar(255) DEFAULT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=257 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+
+通过test_paper_verification.py页面实现如何功能：
+1.读取表中所有数据作为列表，可以选择随机1条数据，也可以输入指定"问题ID"（对应表字段：question_id）获取到特定数据。无论哪种方式，可以通过"Next"按钮，切换到当前数据在列表中的下一条。
+2.合理设计布局，分别展示"问题描述"（对应表字段：question）、"参考答案"（对应表字段：ground_truth）、"参考依据"（对应表字段：quote_info）,以及"源案例内容"。"源案例内容"是一个案例ID的选择列表，其中的案例ID需要从表字段：ori_answer的信息中抽取，ori_answer的信息是以字符串存储的json结构数据，结构如下所示），ori_answer字段数据结构实例：
+{
+    "final_answer": "本题答案...", 
+    "quote_source": 
+        {
+            "16135996": "案例指出...", 
+            "16087751": "案例指出...", 
+            ...
+        }
+}
+通过获取该结构中quote_source字段对应的dict数据，其中所有的key就是"源案例内容"列表中可选择案例ID。
+当选择某个案例ID后，访问mysql表：v_all_ai_manual_case_info（该表的访问配置信息使用：settings.MYSQL_PROD_CONFIG），该表就2个字段:case_id和case_content,选择案例ID后，在页面上展示对应case_content的内容。如果找不到指定case_id，页面报错提示。
+
+3.页面最后，增加一个当前内容的最终审核结论功能，可选择"通过"，"不通过"，并提交，一旦提交，则该条数据在casebase_qa_evaluation中final_check字段被修改为最终审核结论："通过"或"不通过"。
+
+================================================================
+
+test_paper_verification.py 内数据展示部分的布局做个调整，将"问题描述"、"参考答案"与"参考依据"依次上中下罗列放在左侧，"源案例内容"放在右侧，其他部分不变。
+
+================================================================
+
+针对post_handle.py的r1_task_result_handle方法增加一个数据字段的记录，使用Tasks_Results中每条数据的case_id，去mysql数据表：case_data中（mysql的配置信息使用：settings.MYSQL_PROD_CONFIG），根据case_id获取到字段:queue_name的内容（一个case_id只可能找到一条数据，如果找不到数据或找到的数据多于一条，则log中记录错误，但不影响其他流程的进行），然后将queue_name的内容也写入mysql表：casebase_qa_evaluation中的相同字段：queue_name中（mysql的配置信息使用：settings.MYSQL_DEV_CONFIG）。r1_task_result_handle方法的其他部分不变。
+以上涉及到mysql增删改查方法，直接使用utilities.py中已有的方法。
+
+================================================================
+
+根据以下条目，优化 test_paper_verification.py 代码：
+1. 目前只有一个streamlit页面，现增加一个新的tab页，名称：Test Summary，原页面名称设置为：Test Check；
+2. 切换到新tab页：Test Summary时，可以统计出当时mysql表：casebase_qa_evaluation（mysql的配置信息使用：settings.MYSQL_DEV_CONFIG）中不同队列名称下（字段"queue_name"），目前已通过审核的测试题数量（字段"final_check"等于："通过"），通过表单形式呈现；
+3. 原Test Check页面，在"加载数据"这一行，目前有"Next"按钮，代表查看下一条数据，现使用类似逻辑，增加"last"按钮，代表查看上一条数据；
+4. 原Test Check页面，在"当前序号"、"问题ID"、"案例来源"、"审核结果"这一行，增加一个显示字段："队列名称"，输出取自表casebase_qa_evaluation中的"queue_name"字段；
+5. 原Test Check页面，在最后"最终审核结论"处，除了选择"通过"与"不通过"外,增加一个"审核理由"文本框，允许用户填写文字内容，限200字以内。最后填写的内容，同样需要写回mysql表：casebase_qa_evaluation
+
+以上涉及到mysql增删改查方法，直接使用utilities.py中已有的方法。
+
+================================================================
+继续优化 test_paper_verification.py 代码
+在tab页Test Summary，即使当前没有任何已通过审核的数据。也显示为不同队列已经通过审核的表单形态，只不过通过审核的数量为0
+
+================================================================
+继续优化 test_paper_verification.py 代码
+先修改一个bug，目前在tab页Test Summary，点击刷新统计，发现各个队列下数据都为0，但数据库中已有审核通过的数据。
+请确保点击"刷新统计",可以直接读取mysql表：casebase_qa_evaluation（mysql的配置信息使用：settings.MYSQL_DEV_CONFIG）中不同队列名称下（字段"queue_name"），目前已通过审核的测试题数量（字段"final_check"等于："通过"）
+另外，统计时增加不通过（字段"final_check"等于："不通过"）的数量显示，通过与不通过都显示出来。
+
+=============================================================
+继续优化 test_paper_verification.py 代码
+1. 在Tab页： Test Check 中，最后每次提交审核结果按钮成功触发后，能够实现数据重新加载，而不需要手动点击按钮"数据加载"
+2. 在Tab页： Test Summary 中，目前有个bug，就是当Test Check出发了提交审核结果且数据已经成功写入数据库后，点击"刷新统计"，结果并又没显示出来，还是老样子。修正该Bug
+3. 在Tab页： Test Summary 中，表单除了显示现队列名称、通过数量、不通过数量外，另外增加：未处理处理 和 总数量
+4. 整个streamlit增加账号密码登录方式，创建一个配置登陆信息的配置文件用来存储账号和密码信息。允许多个账号密码
+
+===========================================================

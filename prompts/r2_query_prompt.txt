@@ -1,0 +1,7 @@
+**问题描述**：{{question}}
+
+**问题出自的原始案例信息**
+{{case_ori_content}}
+
+**与问题可能相关的参考案例信息**
+{{case_refs_content}}
