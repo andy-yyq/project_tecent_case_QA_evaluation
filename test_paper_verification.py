@@ -85,27 +85,29 @@ def _require_login() -> None:
         st.error("未找到可用的账号配置，请先创建 auth_users.json（可参考 auth_users.json）。")
         st.stop()
 
-    with st.form("tpv_login_form", clear_on_submit=False):
-        username = st.text_input("账号", value="", placeholder="请输入账号")
-        password = st.text_input("密码", value="", placeholder="请输入密码", type="password")
-        submit = st.form_submit_button("登录", type="primary")
-        if submit:
-            u = (username or "").strip()
-            p = password or ""
-            if not u:
-                st.warning("请输入账号")
-                st.stop()
-            if u not in users:
-                st.error("账号或密码错误")
-                st.stop()
-            if _sha256_hex(p) != users[u]:
-                st.error("账号或密码错误")
-                st.stop()
-            st.session_state.tpv_authed = True
-            st.session_state.tpv_authed_user = u
-            st.rerun()
+    col_A, _ = st.columns([1, 2])
+    with col_A:
+        with st.form("tpv_login_form", clear_on_submit=False):
+            username = st.text_input("账号", value="", placeholder="请输入账号")
+            password = st.text_input("密码", value="", placeholder="请输入密码", type="password")
+            submit = st.form_submit_button("登录", type="primary")
+            if submit:
+                u = (username or "").strip()
+                p = password or ""
+                if not u:
+                    st.warning("请输入账号")
+                    st.stop()
+                if u not in users:
+                    st.error("账号或密码错误")
+                    st.stop()
+                if _sha256_hex(p) != users[u]:
+                    st.error("账号或密码错误")
+                    st.stop()
+                st.session_state.tpv_authed = True
+                st.session_state.tpv_authed_user = u
+                st.rerun()
 
-    st.stop()
+        st.stop()
 
 
 def fetch_all_evaluation_rows() -> Tuple[bool, List[Dict[str, Any]], str]:
